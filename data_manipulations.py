@@ -1,5 +1,7 @@
 import pandas as pd
-from scipy.stats import normaltest
+from sklearn.preprocessing import PowerTransformer
+import math
+from scipy.stats import normaltest, norm, probplot, skew
 import matplotlib.pyplot as plt  # Add this line to import matplotlib.pyplot
 from statsmodels.graphics.gofplots import qqplot
 import seaborn as sns
@@ -226,16 +228,16 @@ class Plotter:
             - Graph 2: A 3x3 grid of Q-Q plots for each transformation.
         """
         transformation_names = [
+            "Untransformed",
             "Log",
             "Cube Root",
+            "Seventh Root",
+            "21st Root",
             "Arcsinh",
-            "Quantile",
-            "Custom Power 1",
-            "Custom Power 2",
+            "Arcosh",
             "Box-Cox",
-            "Yeo-Johnson",
-            "Custom Factorial"
-        ]
+            "Yeo-Johnson"
+                              ]
 
         for col in self.eda_data_frame.select_dtypes(include='number').columns:
             print(f"Comparing transformations for column: {col}")
@@ -257,7 +259,10 @@ class Plotter:
                     x = np.linspace(data.min(), data.max(), 1000)
                     ax.plot(x, norm.pdf(x, mu, sigma), 'r-', label='Normal Distribution')
 
-                    ax.set_title(transformation_names[i])
+                    # Calculate skewness and format title
+                    skew_val = skew(data)
+                    title = f"{transformation_names[i]}\nSkewness: {skew_val:.2f}"
+                    ax.set_title(title)
                     ax.legend()
                     ax.grid(axis='y', alpha=0.75)
                 else:
@@ -277,7 +282,8 @@ class Plotter:
 
                     # Q-Q plot
                     probplot(data, dist="norm", plot=ax)
-                    ax.get_lines()[1].set_color('r')  # Red line for theoretical quantiles
+                    if len(ax.get_lines()) > 1:
+                        ax.get_lines()[1].set_color('r')  # Red line for theoretical quantiles
                     ax.set_title(transformation_names[i])
                     ax.grid(alpha=0.75)
                 else:
@@ -301,7 +307,53 @@ class DataFrameTransform:
 
         self.transformed_dataframes = {}  # To store the 10 transformed DataFrames
 
+        # Dictionary mapping transformation names to methods
+        self.transformation_methods = {
+            'log': self.log_transformation,
+            'cube_root': self.cube_root_transformation,
+            'seventh_root': self.seventh_root_transformation,
+            'twenty_first_root': self.twenty_first_root_transformation,
+            'untransformed':self.untransformed_data,
+            'arcsinh': self.arcsinh_transformation,
+            'arcosh': self.arcosh_transformation,
+            'box_cox': self.box_cox_transformation,
+            'yeo_johnson': self.yeo_johnson_transformation
+        }
     
+    def apply_selected_transforms(self, column_transform_map):
+        """
+        Applies specified transformations to designated columns.
+
+        Parameters:
+            column_transform_map (dict): A dictionary where keys are column names
+                                        and values are lists of transformation names to apply.
+
+        Returns:
+            pd.DataFrame: DataFrame with specified transformations applied.
+        """
+        result_df = self.eda_data_frame.copy()
+
+        for transform_name in set([t for sublist in column_transform_map.values() for t in sublist]):
+            if transform_name not in self.transformation_methods:
+                print(f"Transformation '{transform_name}' is not recognized.")
+                continue
+
+            # Run the transformation function (it populates self.transformed_dataframes)
+            self.transformation_methods[transform_name]()
+
+        # Now extract and assign only the transformed columns from self.transformed_dataframes
+        for col, transformations in column_transform_map.items():
+            if col not in result_df.columns:
+                continue
+            for transform_name in transformations:
+                if transform_name in self.transformed_dataframes:
+                    result_df[col] = self.transformed_dataframes[transform_name][col]
+                else:
+                    print(f"[Warning] No transformed data found for transformation '{transform_name}'")
+
+        return result_df
+
+
     def impute_missing_values(self, threshold=20, strategy='mean'):
         """
         Impute missing values in a DataFrame for each column with the mean or median
@@ -336,40 +388,40 @@ class DataFrameTransform:
         return self.eda_data_frame    
 
 
-def drop_columns_with_missing_and_constant_values(self, threshold=50):
-    """
-    Drops columns from the DataFrame if:
-    - The percentage of missing values equals or exceeds the given threshold, OR
-    - All values in the column are the same (constant column).
+    def drop_columns_with_missing_and_constant_values(self, threshold=50):
+        """
+        Drops columns from the DataFrame if:
+        - The percentage of missing values equals or exceeds the given threshold, OR
+        - All values in the column are the same (constant column).
 
-    Parameters:
-        threshold (float): The maximum allowable percentage of missing values (50% by default).
+        Parameters:
+            threshold (float): The maximum allowable percentage of missing values (50% by default).
 
-    Returns:
-        self.eda_data_frame (pd.DataFrame): A DataFrame with columns dropped based on the threshold or constant values.
-    """
-    # Calculate the percentage of missing values for each column
-    missing_percentage = self.eda_data_frame.isnull().sum() / self.no_rows * 100
+        Returns:
+            self.eda_data_frame (pd.DataFrame): A DataFrame with columns dropped based on the threshold or constant values.
+        """
+        # Calculate the percentage of missing values for each column
+        missing_percentage = self.eda_data_frame.isnull().sum() / self.no_rows * 100
 
-    # Identify columns to drop due to missing values
-    columns_to_drop = missing_percentage[missing_percentage >= threshold].index.tolist()
+        # Identify columns to drop due to missing values
+        columns_to_drop = missing_percentage[missing_percentage >= threshold].index.tolist()
 
-    # Identify constant columns (all values are the same)
-    constant_columns = [col for col in self.eda_data_frame.columns if self.eda_data_frame[col].nunique() == 1]
+        # Identify constant columns (all values are the same)
+        constant_columns = [col for col in self.eda_data_frame.columns if self.eda_data_frame[col].nunique() == 1]
 
-    # Combine both sets of columns to drop
-    columns_to_drop.extend(constant_columns)
+        # Combine both sets of columns to drop
+        columns_to_drop.extend(constant_columns)
 
-    # Drop the columns from the DataFrame
-    self.eda_data_frame = self.eda_data_frame.drop(columns=columns_to_drop)
+        # Drop the columns from the DataFrame
+        self.eda_data_frame = self.eda_data_frame.drop(columns=columns_to_drop)
 
-    # Print information about dropped columns
-    if columns_to_drop:
-        print(f"Dropped columns: {columns_to_drop}")
-    else:
-        print("No columns were dropped.")
+        # Print information about dropped columns
+        if columns_to_drop:
+            print(f"Dropped columns: {columns_to_drop}")
+        else:
+            print("No columns were dropped.")
 
-    return self.eda_data_frame
+        return self.eda_data_frame
 
     def drop_rows_with_nulls_in_columns(self, columns):
         """
@@ -401,7 +453,8 @@ def drop_columns_with_missing_and_constant_values(self, threshold=50):
 
         print(f"Dropped {rows_dropped} rows due to null values in columns: {columns}")
 
-        return self.eda_data_frame        
+        return self.eda_data_frame   
+  
 
     def log_transformation(self):
         """
@@ -452,75 +505,69 @@ def drop_columns_with_missing_and_constant_values(self, threshold=50):
 
         self.transformed_dataframes['arcsinh'] = df_transformed
 
-    def quantile_transformation(self, output_distribution='uniform'):
+    def untransformed_data(self):
         """
-        Applies a quantile transformation to all numerical columns in the DataFrame.
-        Maps data to follow a uniform or normal distribution.
-
-        Args:
-            output_distribution (str): The target distribution for the transformation ('uniform' or 'normal').
-
-        Stores the result in the `transformed_dataframes` dictionary under the key 'quantile'.
+        Stores a copy of the original untransformed DataFrame in the
+        `transformed_dataframes` dictionary under the key 'untransformed'.
         """
-        df_transformed = self.eda_data_frame.copy()
+        # Ensure that 'transformed_dataframes' is initialized
+        if not hasattr(self, 'transformed_dataframes'):
+            self.transformed_dataframes = {}
 
-        transformer = QuantileTransformer(output_distribution=output_distribution, random_state=42)
+        # Store a deep copy of the original DataFrame
+        self.transformed_dataframes['untransformed'] = self.eda_data_frame.copy()
 
-        for col in df_transformed.select_dtypes(include='number').columns:
-
-            reshaped_col = df_transformed[col].values.reshape(-1, 1)
-
-            df_transformed[col] = transformer.fit_transform(reshaped_col)
-
-        self.transformed_dataframes['quantile'] = df_transformed
-
-    def custom_power_transformation_1(self):
+    def twenty_first_root_transformation(self):
         """
-        Applies a custom power transformation defined as x^(1 / (x^(6/5))) to all numerical columns in the DataFrame.
-        Handles only positive values; for others, NaN is returned.
-        Stores the result in the `transformed_dataframes` dictionary under the key 'custom_power_1'.
+        Applies a 21st root transformation to all numerical columns in the DataFrame.
+        Stores the result in the `transformed_dataframes` dictionary under the key 'cube_root'.
         """
         df_transformed = self.eda_data_frame.copy()
 
         for col in df_transformed.select_dtypes(include='number').columns:
 
-            df_transformed[col] = df_transformed[col].apply(lambda x: x**(1 / (x**(6/5))) if pd.notnull(x) and x > 0 else x)
+            df_transformed[col] = df_transformed[col].apply(lambda x: x**(1/21) if pd.notnull(x) else x)
 
-        self.transformed_dataframes['custom_power_1'] = df_transformed
+        self.transformed_dataframes['twenty_first_root'] = df_transformed
 
-    def custom_power_transformation_2(self):
+    def seventh_root_transformation(self):
         """
-        Applies a custom power transformation defined as x^(1 / (x^2)) to all numerical columns in the DataFrame.
-        Handles only positive values; for others, NaN is returned.
-        Stores the result in the `transformed_dataframes` dictionary under the key 'custom_power_2'.
+        Applies a seventh root transformation to all numerical columns in the DataFrame.
+        Stores the result in the `transformed_dataframes` dictionary under the key 'cube_root'.
         """
         df_transformed = self.eda_data_frame.copy()
 
         for col in df_transformed.select_dtypes(include='number').columns:
 
-            df_transformed[col] = df_transformed[col].apply(lambda x: x**(1 / (x**2)) if pd.notnull(x) and x > 0 else x)
+            df_transformed[col] = df_transformed[col].apply(lambda x: x**(1/7) if pd.notnull(x) else x)
 
-        self.transformed_dataframes['custom_power_2'] = df_transformed
+        self.transformed_dataframes['seventh_root'] = df_transformed
 
     def box_cox_transformation(self):
         """
         Applies a Box-Cox transformation to all numerical columns in the DataFrame.
         Adjusts values to ensure all are positive by adding abs(min) + 1 if necessary.
-        Stores the result in the `transformed_dataframes` dictionary under the key 'box_cox'.
+        Skips columns that become constant after outlier removal.
         """
         df_transformed = self.eda_data_frame.copy()
 
         for col in df_transformed.select_dtypes(include='number').columns:
+            col_data = df_transformed[col].dropna()
 
-            min_value = df_transformed[col].min()
+            if col_data.nunique() <= 1:
+                print(f"[Box-Cox] Skipping column '{col}' (constant after cleaning)")
+                continue
 
+            min_value = col_data.min()
             if min_value <= 0:
-
                 adjustment = abs(min_value) + 1
-
                 df_transformed[col] += adjustment
 
-            df_transformed[col] = boxcox(df_transformed[col].dropna())[0]
+            try:
+                df_transformed[col] = boxcox(df_transformed[col].dropna())[0]
+            except ValueError as e:
+                print(f"[Box-Cox] Skipping column '{col}' due to error: {e}")
+                continue
 
         self.transformed_dataframes['box_cox'] = df_transformed
 
@@ -542,69 +589,54 @@ def drop_columns_with_missing_and_constant_values(self, threshold=50):
 
         self.transformed_dataframes['yeo_johnson'] = df_transformed
 
-    def custom_transform_factorial(self):
+    def arcosh_transformation(self):
         """
-        Applies a custom transformation defined as (x^(0.8x)) / factorial(round(x)) to all numerical columns.
-        Handles only non-negative values; for others, NaN is returned.
-        Stores the result in the `transformed_dataframes` dictionary under the key 'custom_factorial'.
+        Applies the inverse hyperbolic cosine (arcosh) transformation to all numerical columns.
+        Only valid for values >= 1. Others will result in NaN.
+        Stores the result in the `transformed_dataframes` dictionary under the key 'arcosh'.
         """
         df_transformed = self.eda_data_frame.copy()
 
         for col in df_transformed.select_dtypes(include='number').columns:
+            df_transformed[col] = df_transformed[col].apply(lambda x: np.arccosh(x) if pd.notnull(x) and x >= 1 else np.nan)
 
-            def transform(x):
-
-                if pd.notnull(x) and x >= 0:
-
-                    rounded_x = round(x)
-
-                    try:
-                        return (x**(0.8 * x)) / math.factorial(rounded_x)
-
-                    except (OverflowError, ValueError):
-
-                        return np.nan
-
-                return np.nan
-
-            df_transformed[col] = df_transformed[col].apply(transform)
-
-        self.transformed_dataframes['custom_factorial'] = df_transformed
+        self.transformed_dataframes['arcosh'] = df_transformed
 
     def apply_all_transforms(self):
         """
         Applies all 9 transformations to the DataFrame.
 
         The transformations include:
+            - Untransformed Data
             - Log Transformation
             - Cube Root Transformation
+            - Seventh Power Root
+            - 21 st Power Root
             - Arcsinh Transformation
-            - Quantile Transformation
-            - Custom Power Transformation 1
-            - Custom Power Transformation 2
+            - Arcosh Transformation
             - Box-Cox Transformation
             - Yeo-Johnson Transformation
-            - Custom Factorial-Based Transformation
+        
 
         Returns:
             list: A list of transformed DataFrames.
         """
+        self.untransformed_data()
+
         self.log_transformation()
 
         self.cube_root_transformation()
 
+        self.seventh_root_transformation()
+
+        self.twenty_first_root_transformation()
+
         self.arcsinh_transformation()
 
-        self.quantile_transformation()
-
-        self.custom_power_transformation_1()
-
-        self.custom_power_transformation_2()
+        self.arcosh_transformation()
 
         self.box_cox_transformation()
 
         self.yeo_johnson_transformation()
-
-        self.custom_transform_factorial()
 
         return [self.transformed_dataframes[key] for key in self.transformed_dataframes.keys()]
