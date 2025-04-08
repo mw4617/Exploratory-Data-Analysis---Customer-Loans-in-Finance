@@ -1,6 +1,7 @@
 import pandas as pd
 from sklearn.preprocessing import PowerTransformer
 import math
+import plotly.express as px
 from scipy.stats import normaltest, norm, probplot, skew
 import matplotlib.pyplot as plt  # Add this line to import matplotlib.pyplot
 from statsmodels.graphics.gofplots import qqplot
@@ -214,6 +215,41 @@ class Plotter:
         plt.tight_layout()
         plt.show()
 
+    def plot_correlation_heat_map(self):
+        """
+        Plots a heatmap of the correlation matrix for numeric columns only.
+        Uses a cleaner layout and 'viridis' colormap.
+        """
+        numeric_df = self.eda_data_frame.select_dtypes(include=[np.number])
+        corr = numeric_df.corr()
+
+        mask = np.triu(np.ones_like(corr, dtype=bool))
+        cmap = plt.cm.viridis  # New colormap here
+
+        fig, ax = plt.subplots(figsize=(1.2 * len(corr.columns), 1.0 * len(corr.columns)))
+
+        sns.heatmap(
+            corr,
+            mask=mask,
+            cmap=cmap,
+            vmax=1.0,
+            vmin=-1.0,
+            center=0,
+            square=True,
+            annot=True,
+            fmt=".2f",
+            linewidths=0.5,
+            cbar_kws={"shrink": 0.75},
+            ax=ax
+        )
+
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right', fontsize=10)
+        ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=10)
+        ax.set_title('Correlation Matrix of Numerical Features', fontsize=14, pad=20)
+
+        plt.tight_layout()
+        plt.show()
+
     def compare_transformations(self, transformed_dataframes):
         """
         Plots comparison graphs for 9 transformations across numerical columns.
@@ -320,6 +356,18 @@ class DataFrameTransform:
             'yeo_johnson': self.yeo_johnson_transformation
         }
     
+    def drop_column(self, column_name):
+        """
+        Drops a specific column from the DataFrame if it exists.
+        """
+        if column_name in self.eda_data_frame.columns:
+            self.eda_data_frame.drop(columns=[column_name], inplace=True)
+            print(f"Column '{column_name}' has been dropped.")
+        else:
+            print(f"Column '{column_name}' does not exist in the DataFrame.")
+        
+        return self.eda_data_frame
+
     def apply_selected_transforms(self, column_transform_map):
         """
         Applies specified transformations to designated columns.
@@ -454,7 +502,42 @@ class DataFrameTransform:
         print(f"Dropped {rows_dropped} rows due to null values in columns: {columns}")
 
         return self.eda_data_frame   
-  
+    
+    def remove_strand_outlier(self, column, bin_count=100, frequency_ratio_threshold=5.0):
+        """
+        Removes rows corresponding to a single-bin spike in the histogram of a column.
+        
+        Parameters:
+            column (str): The column to analyze.
+            bin_count (int): Number of histogram bins (default: 100).
+            frequency_ratio_threshold (float): How much larger the max bin can be relative to the median to be flagged (default: 5.0).
+            
+        Returns:
+            pd.DataFrame: DataFrame with strand outlier rows removed.
+        """
+        col_data = self.eda_data_frame[column].dropna()
+
+        # Generate histogram
+        frequencies, bin_edges = np.histogram(col_data, bins=bin_count)
+
+        max_freq_index = np.argmax(frequencies)
+        max_freq = frequencies[max_freq_index]
+        median_freq = np.median(frequencies)
+
+        # Check if it's a spike
+        if max_freq > frequency_ratio_threshold * median_freq:
+            bin_start = bin_edges[max_freq_index]
+            bin_end = bin_edges[max_freq_index + 1]
+
+            mask = ~((self.eda_data_frame[column] >= bin_start) & (self.eda_data_frame[column] < bin_end))
+            removed_count = (~mask).sum()
+            print(f"[Strand Outlier Removal] Removed {removed_count} rows from '{column}' in bin range [{bin_start:.2f}, {bin_end:.2f}]")
+
+            self.eda_data_frame = self.eda_data_frame[mask]
+        else:
+            print(f"[Strand Outlier Removal] No dominant spike found in '{column}'.")
+
+        return self.eda_data_frame                                                                                                
 
     def log_transformation(self):
         """
@@ -544,12 +627,9 @@ class DataFrameTransform:
         self.transformed_dataframes['seventh_root'] = df_transformed
 
     def box_cox_transformation(self):
-        """
-        Applies a Box-Cox transformation to all numerical columns in the DataFrame.
-        Adjusts values to ensure all are positive by adding abs(min) + 1 if necessary.
-        Skips columns that become constant after outlier removal.
-        """
         df_transformed = self.eda_data_frame.copy()
+        self.box_cox_lambdas = {}
+        self.box_cox_adjustments = {}
 
         for col in df_transformed.select_dtypes(include='number').columns:
             col_data = df_transformed[col].dropna()
@@ -559,12 +639,20 @@ class DataFrameTransform:
                 continue
 
             min_value = col_data.min()
+            adjustment = 0
+
             if min_value <= 0:
                 adjustment = abs(min_value) + 1
-                df_transformed[col] += adjustment
+                df_transformed[col] = df_transformed[col] + adjustment
+
+            df_transformed[col] = df_transformed[col].astype(float)  # Ensure dtype compatibility
 
             try:
-                df_transformed[col] = boxcox(df_transformed[col].dropna())[0]
+                transformed, fitted_lambda = boxcox(df_transformed[col].dropna())
+                # Safely assign transformed values
+                df_transformed.loc[df_transformed[col].dropna().index, col] = transformed
+                self.box_cox_lambdas[col] = fitted_lambda
+                self.box_cox_adjustments[col] = adjustment
             except ValueError as e:
                 print(f"[Box-Cox] Skipping column '{col}' due to error: {e}")
                 continue
@@ -598,7 +686,7 @@ class DataFrameTransform:
         df_transformed = self.eda_data_frame.copy()
 
         for col in df_transformed.select_dtypes(include='number').columns:
-            df_transformed[col] = df_transformed[col].apply(lambda x: np.arccosh(x) if pd.notnull(x) and x >= 1 else np.nan)
+            df_transformed[col] = df_transformed[col].apply(lambda x: np.arccosh((x**(0.5))+1))
 
         self.transformed_dataframes['arcosh'] = df_transformed
 
