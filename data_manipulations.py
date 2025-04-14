@@ -3,7 +3,10 @@ from sklearn.preprocessing import PowerTransformer
 import math
 import plotly.express as px
 from scipy.stats import normaltest, norm, probplot, skew
-import matplotlib.pyplot as plt  # Add this line to import matplotlib.pyplot
+import matplotlib.pyplot as plt  
+import matplotlib.ticker as ticker
+from scipy.special import inv_boxcox
+from sklearn.preprocessing import PowerTransformer
 from statsmodels.graphics.gofplots import qqplot
 import seaborn as sns
 import numpy as np
@@ -112,7 +115,89 @@ class DataFrameInfo:
                 print("Normality Test: Not applicable (non-numeric column).")
 
 
+class LoanAnalyzer:
+    """
+    Analyzes the current repayment status of loans and provides repayment projections.
+    """
 
+    def __init__(self, df):
+        """
+        Initializes the LoanAnalyzer and computes total_paid if it doesn't exist.
+        """
+        self.df = df.copy()
+
+        if 'total_paid' not in self.df.columns:
+            self.df['total_paid'] = (
+                self.df['total_rec_prncp'].fillna(0) +
+                self.df['total_rec_int'].fillna(0) +
+                self.df['total_rec_late_fee'].fillna(0) +
+                self.df['recoveries'].fillna(0)
+            )
+
+    def calculate_recovery_stats(self):
+        """
+        Calculates total expected payment, total paid to date, and the percentage recovered.
+        Also prints diagnostics to verify amounts.
+        """
+        total_expected = self.df['total_payment'].sum()
+        total_paid = self.df['total_paid'].sum()
+        recovery_percentage = (total_paid / total_expected) * 100 if total_expected else 0
+
+        # Diagnostic print block
+        print(f"Total expected payment (sum): ${total_expected:,.2f}")
+        print(f"Total principal recovered:    ${self.df['total_rec_prncp'].sum():,.2f}")
+        print(f"Total interest recovered:     ${self.df['total_rec_int'].sum():,.2f}")
+        print(f"Total late fees recovered:    ${self.df['total_rec_late_fee'].sum():,.2f}")
+        print(f"Recoveries:                   ${self.df['recoveries'].sum():,.2f}")
+        print(f"Total paid (sum):             ${total_paid:,.2f}")
+        print(f"Remaining to be paid:         ${total_expected - total_paid:,.2f}")
+
+        return {
+            'total_expected': total_expected,
+            'total_paid': total_paid,
+            'recovery_percentage': recovery_percentage
+        }
+
+    def calculate_next_6_months_projection(self):
+        """
+        Projects the total repayment expected in the next 6 months.
+        It ensures no loan is projected to pay more than its remaining balance,
+        and the total projection does not exceed the actual remaining balance.
+        """
+        # Recompute total_paid and remaining balances
+        self.df['total_paid'] = (
+            self.df['total_rec_prncp'].fillna(0) +
+            self.df['total_rec_int'].fillna(0) +
+            self.df['total_rec_late_fee'].fillna(0) +
+            self.df['recoveries'].fillna(0)
+        )
+
+        # Global expected remaining (same as in diagnostic print)
+        total_expected = self.df['total_payment'].sum()
+        total_paid = self.df['total_paid'].sum()
+        total_remaining = max(total_expected - total_paid, 0)  # global cap
+
+        # Per-loan level projections (min of 6*instalment vs remaining)
+        self.df['remaining'] = (self.df['total_payment'] - self.df['total_paid']).clip(lower=0)
+        self.df['projected_payment'] = self.df['instalment'].fillna(0) * 6
+        self.df['projected_payment'] = self.df[['projected_payment', 'remaining']].min(axis=1)
+
+        # Final capped result
+        projected_sum = self.df['projected_payment'].sum()
+        return min(round(projected_sum, 2), round(total_remaining, 2))
+
+
+    def get_repayment_summary(self):
+        """
+        Combines all repayment analysis into a single dictionary:
+        - Total expected
+        - Total paid
+        - Recovery percentage
+        - Next 6 months projection
+        """
+        stats = self.calculate_recovery_stats()
+        stats['next_6_months_projection'] = self.calculate_next_6_months_projection()
+        return stats
     
 class Plotter:
     
@@ -328,34 +413,102 @@ class Plotter:
             plt.tight_layout(rect=[0, 0, 1, 0.96])
             plt.show()
 
+    def plot_loan_repayment_summary(self, total_paid, total_expected, next_6_months_payment):
+            """
+            Plots a bar chart summarizing loan repayment status:
+            - Total paid so far
+            - Remaining amount
+            - Next 6 months projection
+
+            Parameters:
+                total_paid (float): Total amount already paid
+                total_expected (float): Total expected payment over loan term
+                next_6_months_payment (float): Projected payment in next 6 months
+            """
+            remaining = max(total_expected - total_paid, 0)
+
+            values = [total_paid, remaining, next_6_months_payment]
+            labels = ['Recovered', 'Remaining', 'Next 6 Months']
+            colors = ['green', 'gray', 'blue']
+
+            plt.figure(figsize=(10, 6))
+            bars = plt.bar(labels, values, color=colors)
+
+            plt.title("Loan Repayment Summary")
+            plt.ylabel("Amount ($, in millions)")
+            plt.grid(axis='y', linestyle='--', alpha=0.5)
+
+            # Use formatter to display y-axis in millions
+            formatter = ticker.FuncFormatter(lambda x, _: f'${x * 1e-6:,.0f}M')
+            plt.gca().yaxis.set_major_formatter(formatter)
+
+            # Add value labels above bars
+            for bar in bars:
+                yval = bar.get_height()
+                # Use full dollar value if less than $1M, else show in millions
+                if yval < 1_000_000:
+                    label = f"${yval:,.0f}"
+                else:
+                    label = f"${yval * 1e-6:,.0f}M"
+
+                # Offset label to appear clearly above bar
+                plt.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    yval + max(total_expected * 0.01, 1e6 * 0.01),  # ~1% of height
+                    label,
+                    ha='center',
+                    va='bottom',
+                    fontsize=10
+                )
+
+            plt.tight_layout()
+            plt.show()
+
 class DataFrameTransform:
 
-    def __init__(self,eda_data_frame):
+    def __init__(self, eda_data_frame):
         """
         Initialize the DataFrameTransform class.
 
         Args:
             eda_data_frame (pd.DataFrame): The input DataFrame to be transformed.
         """
-        self.eda_data_frame=eda_data_frame
+        self.eda_data_frame = eda_data_frame
+        self.no_rows = len(self.eda_data_frame)
+        self.transformed_dataframes = {}
 
-        self.no_rows=len(self.eda_data_frame)
+        # Box-Cox-specific parameters for inversion
+        self.box_cox_lambdas = {}
+        self.box_cox_adjustments = {}
 
-        self.transformed_dataframes = {}  # To store the 10 transformed DataFrames
+        #line to prevent AttributeError
+        self.yeo_johnson_transformers = {}
 
-        # Dictionary mapping transformation names to methods
+        # Forward transformation mapping
         self.transformation_methods = {
             'log': self.log_transformation,
             'cube_root': self.cube_root_transformation,
             'seventh_root': self.seventh_root_transformation,
             'twenty_first_root': self.twenty_first_root_transformation,
-            'untransformed':self.untransformed_data,
+            'untransformed': self.untransformed_data,
             'arcsinh': self.arcsinh_transformation,
             'arcosh': self.arcosh_transformation,
             'box_cox': self.box_cox_transformation,
             'yeo_johnson': self.yeo_johnson_transformation
         }
-    
+
+        # Inverse transformation mapping
+        self.inverse_transformation_methods = {
+            'log': self.inverse_log_transformation,
+            'cube_root': self.inverse_cube_root_transformation,
+            'seventh_root': self.inverse_seventh_root_transformation,
+            'twenty_first_root': self.inverse_twenty_first_root_transformation,
+            'arcsinh': self.inverse_arcsinh_transformation,
+            'arcosh': self.inverse_arcosh_transformation,
+            'box_cox': self.inverse_box_cox_transformation,
+            'yeo_johnson': self.inverse_yeo_johnson_transformation
+        }
+        
     def drop_column(self, column_name):
         """
         Drops a specific column from the DataFrame if it exists.
@@ -368,39 +521,105 @@ class DataFrameTransform:
         
         return self.eda_data_frame
 
-    def apply_selected_transforms(self, column_transform_map):
+    def apply_selected_transforms(self, column_transform_map: dict) -> pd.DataFrame:
         """
-        Applies specified transformations to designated columns.
+        Applies selected transformations to specific columns in the DataFrame.
 
         Parameters:
-            column_transform_map (dict): A dictionary where keys are column names
-                                        and values are lists of transformation names to apply.
+            column_transform_map (dict): Dictionary mapping column names to a list of transformation names to apply.
+                                        Example: {'loan_amount': ['yeo_johnson'], 'id': ['seventh_root']}
 
         Returns:
-            pd.DataFrame: DataFrame with specified transformations applied.
+            pd.DataFrame: A new DataFrame with transformed values applied to specified columns.
         """
         result_df = self.eda_data_frame.copy()
 
-        for transform_name in set([t for sublist in column_transform_map.values() for t in sublist]):
-            if transform_name not in self.transformation_methods:
-                print(f"Transformation '{transform_name}' is not recognized.")
-                continue
+        # Identify all unique transformation names (excluding 'untransformed')
+        requested_transforms = set(
+            t for transform_list in column_transform_map.values() for t in transform_list if t != 'untransformed'
+        )
 
-            # Run the transformation function (it populates self.transformed_dataframes)
-            self.transformation_methods[transform_name]()
+        # Execute each transformation method once
+        for transform_name in requested_transforms:
+            if transform_name in self.transformation_methods:
+                self.transformation_methods[transform_name]()
 
-        # Now extract and assign only the transformed columns from self.transformed_dataframes
-        for col, transformations in column_transform_map.items():
-            if col not in result_df.columns:
-                continue
-            for transform_name in transformations:
-                if transform_name in self.transformed_dataframes:
-                    result_df[col] = self.transformed_dataframes[transform_name][col]
-                else:
-                    print(f"[Warning] No transformed data found for transformation '{transform_name}'")
+        # Apply transformed values to the specified columns
+        for col, transforms in column_transform_map.items():
+            for transform_name in transforms:
+                if transform_name == 'untransformed':
+                    continue
+
+                transformed_df = self.transformed_dataframes.get(transform_name)
+                if transformed_df is not None and col in transformed_df.columns:
+                    result_df[col] = transformed_df[col]
 
         return result_df
+    
+    def apply_inverse_column_transforms(self, column_transform_map):
+        """
+        Reverses the transformations based on the column_transform_map used during forward transformation.
 
+        Parameters:
+            column_transform_map (dict): A dictionary where keys are column names and values
+                                        are lists of transformation names applied to those columns.
+
+        Returns:
+            pd.DataFrame: DataFrame with inverse transformations applied to specified columns only.
+                        Prevents re-adding columns that were manually dropped.
+        """
+        inverse_df = self.eda_data_frame.copy()
+        current_columns = set(inverse_df.columns)  # Track only current cols
+
+        for col, transforms in column_transform_map.items():
+            if not transforms or transforms[0] == 'untransformed':
+                continue
+
+            transform_name = transforms[0]
+
+            if transform_name not in self.inverse_transformation_methods:
+                print(f"[Inverse] No inverse method for '{transform_name}' — skipping column '{col}'")
+                continue
+
+            inverse_transformed_df = self.inverse_transformation_methods[transform_name]()
+
+            # Only apply the inverse if:
+            # 1. The column was part of the inverse transform result
+            # 2. The column currently exists in the DataFrame (i.e., wasn’t manually dropped)
+            if col in inverse_transformed_df.columns and col in current_columns:
+                inverse_df[col] = inverse_transformed_df[col]
+            else:
+                print(f"[Inverse] Column '{col}' not applied. Reason: not in current frame or inverse output.")
+
+        return inverse_df
+
+    def export_transformation_state(self):
+        """
+        Exports the internal transformation state, including:
+        - Transformed data
+        - Box-Cox lambdas and adjustments
+        - Yeo-Johnson fitted transformer
+        - Original column names
+        """
+        return {
+            "transformed_dataframes": self.transformed_dataframes,
+            "box_cox_lambdas": self.box_cox_lambdas,
+            "box_cox_adjustments": self.box_cox_adjustments,
+            "yeo_johnson_transformers": self.yeo_johnson_transformers,
+            "original_columns": list(self.eda_data_frame.columns)
+        }
+
+    def import_transformation_state(self, state):
+        """
+        Restores previously saved transformation state.
+        
+        Parameters:
+            state (dict): Dictionary of transformation metadata.
+        """
+        self.transformed_dataframes = state.get("transformed_dataframes", {})
+        self.box_cox_lambdas = state.get("box_cox_lambdas", {})
+        self.box_cox_adjustments = state.get("box_cox_adjustments", {})
+        self.yeo_johnson_transformers = state.get("yeo_johnson_transformers", {})
 
     def impute_missing_values(self, threshold=20, strategy='mean'):
         """
@@ -664,16 +883,21 @@ class DataFrameTransform:
         Applies a Yeo-Johnson transformation to all numerical columns in the DataFrame.
         The Yeo-Johnson transformation can handle both positive and negative values.
         Stores the result in the `transformed_dataframes` dictionary under the key 'yeo_johnson'.
+        Also stores individual transformers for inverse transformation.
         """
         df_transformed = self.eda_data_frame.copy()
 
-        transformer = PowerTransformer(method='yeo-johnson', standardize=False)
+        # Initialize if not already
+        if not hasattr(self, 'yeo_johnson_transformers'):
+            self.yeo_johnson_transformers = {}
 
-        for col in df_transformed.select_dtypes(include='number').columns:
+        numeric_cols = df_transformed.select_dtypes(include='number').columns
 
-            reshaped_col = df_transformed[col].values.reshape(-1, 1)
-
+        for col in numeric_cols:
+            reshaped_col = df_transformed[[col]].values  # Keeps 2D shape
+            transformer = PowerTransformer(method='yeo-johnson', standardize=False)
             df_transformed[col] = transformer.fit_transform(reshaped_col)
+            self.yeo_johnson_transformers[col] = transformer  # Store transformer for inverse
 
         self.transformed_dataframes['yeo_johnson'] = df_transformed
 
@@ -689,6 +913,176 @@ class DataFrameTransform:
             df_transformed[col] = df_transformed[col].apply(lambda x: np.arccosh((x**(0.5))+1))
 
         self.transformed_dataframes['arcosh'] = df_transformed
+
+    def inverse_log_transformation(self):
+        """
+        Inverts the log transformation for all numerical columns.
+        Adjusts using the same offset used during log transform if original data contained non-positive values.
+        
+        Returns:
+            pd.DataFrame: Inverse log-transformed DataFrame.
+        """
+        if 'log' not in self.transformed_dataframes:
+            raise ValueError("Log transformation not found.")
+
+        df = self.transformed_dataframes['log'].copy()
+
+        for col in df.select_dtypes(include='number').columns:
+            original_min = self.eda_data_frame[col].min()
+            adjustment = abs(original_min) + 1 if original_min <= 0 else 0
+            df[col] = df[col].apply(lambda x: np.exp(x) - adjustment if pd.notnull(x) else x)
+
+        return df
+
+
+    def inverse_cube_root_transformation(self):
+        """
+        Inverts the cube root transformation for all numerical columns.
+
+        Returns:
+            pd.DataFrame: Inverse cube-root-transformed DataFrame.
+        """
+        if 'cube_root' not in self.transformed_dataframes:
+            raise ValueError("Cube root transformation not found.")
+
+        df = self.transformed_dataframes['cube_root'].copy()
+
+        for col in df.select_dtypes(include='number').columns:
+            df[col] = df[col].apply(lambda x: x ** 3 if pd.notnull(x) else x)
+
+        return df
+
+
+    def inverse_seventh_root_transformation(self):
+        """
+        Inverts the seventh root transformation for all numerical columns.
+
+        Returns:
+            pd.DataFrame: Inverse seventh-root-transformed DataFrame.
+        """
+        if 'seventh_root' not in self.transformed_dataframes:
+            raise ValueError("Seventh root transformation not found.")
+
+        df = self.transformed_dataframes['seventh_root'].copy()
+
+        for col in df.select_dtypes(include='number').columns:
+            df[col] = df[col].apply(lambda x: x ** 7 if pd.notnull(x) else x)
+
+        return df
+
+
+    def inverse_twenty_first_root_transformation(self):
+        """
+        Inverts the twenty-first root transformation for all numerical columns.
+
+        Returns:
+            pd.DataFrame: Inverse 21st-root-transformed DataFrame.
+        """
+        if 'twenty_first_root' not in self.transformed_dataframes:
+            raise ValueError("Twenty-first root transformation not found.")
+
+        df = self.transformed_dataframes['twenty_first_root'].copy()
+
+        for col in df.select_dtypes(include='number').columns:
+            df[col] = df[col].apply(lambda x: x ** 21 if pd.notnull(x) else x)
+
+        return df
+
+
+    def inverse_arcsinh_transformation(self):
+        """
+        Inverts the arcsinh transformation for all numerical columns using the sinh function.
+
+        Returns:
+            pd.DataFrame: Inverse arcsinh-transformed DataFrame.
+        """
+        if 'arcsinh' not in self.transformed_dataframes:
+            raise ValueError("Arcsinh transformation not found.")
+
+        df = self.transformed_dataframes['arcsinh'].copy()
+
+        for col in df.select_dtypes(include='number').columns:
+            df[col] = df[col].apply(lambda x: np.sinh(x) if pd.notnull(x) else x)
+
+        return df
+
+
+    def inverse_arcosh_transformation(self):
+        """
+        Inverts the arcosh transformation for all numerical columns.
+        Uses the identity: x = (cosh(y) - 1)^2
+
+        Returns:
+            pd.DataFrame: Inverse arcosh-transformed DataFrame.
+        """
+        if 'arcosh' not in self.transformed_dataframes:
+            raise ValueError("Arcosh transformation not found.")
+
+        df = self.transformed_dataframes['arcosh'].copy()
+
+        for col in df.select_dtypes(include='number').columns:
+            df[col] = df[col].apply(lambda x: (np.cosh(x) - 1) ** 2 if pd.notnull(x) else x)
+
+        return df
+
+
+    def inverse_box_cox_transformation(self):
+        """
+        Inverts the Box-Cox transformation using the stored lambda values and pre-shift adjustments.
+        Uses scipy.special.inv_boxcox.
+
+        Returns:
+            pd.DataFrame: Inverse Box-Cox-transformed DataFrame.
+        """
+        if 'box_cox' not in self.transformed_dataframes:
+            raise ValueError("Box-Cox transformation not found.")
+
+        if not hasattr(self, 'box_cox_lambdas'):
+            raise ValueError("Box-Cox lambdas not stored. Cannot invert.")
+
+        df = self.transformed_dataframes['box_cox'].copy()
+
+        for col in df.select_dtypes(include='number').columns:
+            if col not in self.box_cox_lambdas:
+                print(f"[Inverse Box-Cox] Lambda not found for '{col}', skipping.")
+                continue
+
+            lam = self.box_cox_lambdas[col]
+            adjustment = self.box_cox_adjustments.get(col, 0)
+
+            try:
+                df[col] = inv_boxcox(df[col], lam) - adjustment
+            except Exception as e:
+                print(f"[Inverse Box-Cox] Failed for column '{col}': {e}")
+
+        return df
+
+
+    def inverse_yeo_johnson_transformation(self):
+        """
+        Inverts the Yeo-Johnson transformation using stored transformers per column.
+
+        Returns:
+            pd.DataFrame: Inverse-transformed DataFrame.
+        """
+        if 'yeo_johnson' not in self.transformed_dataframes:
+            raise ValueError("Yeo-Johnson transformation not found.")
+
+        df = self.transformed_dataframes['yeo_johnson'].copy()
+        numeric_cols = df.select_dtypes(include='number').columns
+
+        for col in numeric_cols:
+            if col not in self.yeo_johnson_transformers:
+                print(f"[Inverse Yeo-Johnson] Missing transformer for column: {col}")
+                continue
+            try:
+                reshaped = df[[col]].values
+                df[col] = self.yeo_johnson_transformers[col].inverse_transform(reshaped)
+            except Exception as e:
+                print(f"[Inverse Yeo-Johnson] Inversion failed for column '{col}': {e}")
+
+        return df
+
 
     def apply_all_transforms(self):
         """
