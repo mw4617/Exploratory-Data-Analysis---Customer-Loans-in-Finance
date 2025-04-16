@@ -199,6 +199,92 @@ class LoanAnalyzer:
         stats['next_6_months_projection'] = self.calculate_next_6_months_projection()
         return stats
     
+    def get_charged_off_loss_summary(self):
+        """
+        Calculates and summarizes losses from charged-off loans.
+        Returns the number and percentage of charged-off loans, total loss, and average loss.
+        """
+        charged_off_df = self.df[self.df['loan_status'] == 'Charged Off'].copy()
+
+        charged_off_df['loss'] = charged_off_df['funded_amount'] - charged_off_df['total_paid']
+        charged_off_df['loss'] = charged_off_df['loss'].clip(lower=0)
+
+        total_loans = len(self.df)
+        charged_off_loans = len(charged_off_df)
+
+        loss_summary = {
+            'total_charged_off': charged_off_loans,
+            'charged_off_percentage': (charged_off_loans / total_loans) * 100 if total_loans else 0,
+            'total_loss': charged_off_df['loss'].sum(),
+            'avg_loss': charged_off_df['loss'].mean() if charged_off_loans else 0
+        }
+
+        return loss_summary
+
+
+    def calculate_projected_loss(self):
+        """
+        Estimates the projected loss if all charged-off loans had been fully repaid.
+        
+        Returns:
+            dict: Contains actual loss, projected full repayment, and the gap.
+        """
+        charged_off = self.df[self.df['loan_status'] == 'Charged Off'].copy()
+
+        if charged_off.empty:
+            return {'actual_loss': 0, 'projected_loss': 0, 'total_gap': 0}
+
+        # Actual loss: funded amount - total recovered
+        charged_off['total_paid'] = (
+            charged_off['total_rec_prncp'].fillna(0) +
+            charged_off['total_rec_int'].fillna(0) +
+            charged_off['total_rec_late_fee'].fillna(0) +
+            charged_off['recoveries'].fillna(0)
+        )
+        charged_off['actual_loss'] = charged_off['funded_amount'] - charged_off['total_paid']
+        charged_off['actual_loss'] = charged_off['actual_loss'].clip(lower=0)
+
+        # Projected loss = funded amount - total expected payment
+        charged_off['projected_loss'] = charged_off['funded_amount'] - charged_off['total_payment']
+        charged_off['projected_loss'] = charged_off['projected_loss'].clip(lower=0)
+
+        total_actual_loss = charged_off['actual_loss'].sum()
+        total_projected_loss = charged_off['projected_loss'].sum()
+        total_gap = total_actual_loss - total_projected_loss
+
+        return {
+            'actual_loss': total_actual_loss,
+            'projected_loss': total_projected_loss,
+            'total_gap': total_gap
+        }
+
+    def get_late_loan_loss_estimate(self):
+        """
+        Estimates potential losses from late loans by checking shortfall vs funded amount.
+        Returns a DataFrame with estimated loss per late loan.
+        """
+        late_loans = self.df[self.df['loan_status'].str.contains('Late', na=False)].copy()
+        late_loans['estimated_remaining'] = late_loans['total_payment'] - late_loans['total_paid']
+        late_loans['estimated_loss'] = late_loans['funded_amount'] - late_loans['total_paid'] - late_loans['estimated_remaining']
+        late_loans['estimated_loss'] = late_loans['estimated_loss'].clip(lower=0)
+
+        return late_loans[['id', 'loan_status', 'funded_amount', 'total_paid', 'estimated_loss']]
+
+
+    def tag_loss_risk_users(self, loss_threshold=0.5):
+        """
+        Tags loans as high loss risk if estimated_loss / funded_amount exceeds threshold.
+        Adds a 'high_loss_risk' boolean column.
+        """
+        late_loans = self.get_late_loan_loss_estimate()
+        late_loans['loss_ratio'] = late_loans['estimated_loss'] / late_loans['funded_amount']
+        late_loans['high_loss_risk'] = late_loans['loss_ratio'] > loss_threshold
+
+        result = self.df.copy()
+        result['high_loss_risk'] = result['id'].isin(late_loans[late_loans['high_loss_risk']]['id'])
+
+        return result
+
 class Plotter:
     
     def __init__(self,eda_data_frame):
@@ -463,6 +549,153 @@ class Plotter:
 
             plt.tight_layout()
             plt.show()
+
+    def plot_loss_distribution(self):
+        """
+        Plots a histogram of loss amounts for charged-off loans.
+        """
+        df = self.eda_data_frame.copy()
+
+        if 'total_paid' not in df.columns:
+            df['total_paid'] = (
+                df['total_rec_prncp'].fillna(0) +
+                df['total_rec_int'].fillna(0) +
+                df['total_rec_late_fee'].fillna(0) +
+                df['recoveries'].fillna(0)
+            )
+
+        if 'loss' not in df.columns:
+            df['loss'] = df['funded_amount'] - df['total_paid']
+
+        df['loss'] = df['loss'].clip(lower=0)
+        charged_off = df[df['loan_status'] == 'Charged Off']
+
+        plt.figure(figsize=(10, 6))
+        plt.hist(charged_off['loss'].dropna(), bins=100, color='red', alpha=0.7, edgecolor='black')
+        plt.title('Loss Distribution for Charged-Off Loans')
+        plt.xlabel('Loss Amount')
+        plt.ylabel('Frequency')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+
+    def plot_loss_risk_users(self):
+        """
+        Plots bar chart of loans tagged as high risk for loss.
+        """
+        if 'high_loss_risk' not in self.eda_data_frame.columns:
+            print("No 'high_loss_risk' column found.")
+            return
+
+        risk_counts = self.eda_data_frame['high_loss_risk'].value_counts()
+        plt.figure(figsize=(6, 4))
+        risk_counts.plot(kind='bar', color=['green', 'red'])
+        plt.title('High Loss Risk Tag Distribution')
+        plt.xticks(ticks=[0, 1], labels=['No', 'Yes'], rotation=0)
+        plt.ylabel('Number of Loans')
+        plt.tight_layout()
+        plt.show()        
+
+    def plot_projected_loss_bar(self, summary):
+        """
+        Plots a bar chart comparing actual vs projected losses for charged-off loans.
+        
+        Parameters:
+            summary (dict): Dictionary containing:
+                - 'actual_loss': Actual loss from charged-off loans
+                - 'projected_loss': Estimated loss if charged-off loans had completed repayment
+                - 'total_gap': Difference between actual and projected losses
+        """
+        actual = summary.get('actual_loss', 0)
+        projected = summary.get('projected_loss', 0)
+        gap = summary.get('total_gap', 0)
+
+        labels = ['Actual Loss', 'Projected Loss', 'Gap']
+        values = [actual, projected, gap]
+        colors = ['red', 'orange', 'gray']
+
+        plt.figure(figsize=(10, 6))
+        bars = plt.bar(labels, values, color=colors)
+
+        plt.title("Charged-Off Loan Loss: Actual vs Projected")
+        plt.ylabel("Loss Amount ($)")
+        plt.grid(axis='y', linestyle='--', alpha=0.6)
+
+        # Add value labels above bars
+        for bar in bars:
+            yval = bar.get_height()
+            label = f"${yval:,.0f}"
+            plt.text(
+                bar.get_x() + bar.get_width() / 2,
+                yval + yval * 0.02,
+                label,
+                ha='center',
+                va='bottom',
+                fontsize=10
+            )
+
+        plt.tight_layout()
+        plt.show()
+    def plot_estimated_loss_for_late_loans(self):
+        """
+        Plots a histogram of estimated losses for currently late loans.
+        """
+        df = self.eda_data_frame.copy()
+
+        # Filter to late loans only
+        late_loans = df[df['loan_status'].str.contains('Late', na=False)].copy()
+
+        # Calculate estimated loss if not already done
+        if 'total_paid' not in late_loans.columns:
+            late_loans['total_paid'] = (
+                late_loans['total_rec_prncp'].fillna(0) +
+                late_loans['total_rec_int'].fillna(0) +
+                late_loans['total_rec_late_fee'].fillna(0) +
+                late_loans['recoveries'].fillna(0)
+            )
+
+        late_loans['estimated_remaining'] = late_loans['total_payment'] - late_loans['total_paid']
+        late_loans['estimated_loss'] = late_loans['funded_amount'] - late_loans['total_paid'] - late_loans['estimated_remaining']
+        late_loans['estimated_loss'] = late_loans['estimated_loss'].clip(lower=0)
+
+        plt.figure(figsize=(10, 6))
+        plt.hist(late_loans['estimated_loss'].dropna(), bins=100, color='orange', edgecolor='black', alpha=0.7)
+        plt.title('Estimated Loss Distribution for Late Loans')
+        plt.xlabel('Estimated Loss Amount')
+        plt.ylabel('Frequency')
+        plt.grid(True)
+
+        # Format x-axis with dollar values
+        formatter = ticker.FuncFormatter(lambda x, _: f'${x:,.0f}')
+        plt.gca().xaxis.set_major_formatter(formatter)
+
+        plt.tight_layout()
+        plt.show()
+    
+    def plot_categorical_comparison(self, categorical_columns, hue_col='risk_group'):
+        """
+        Plots grouped bar charts (countplot) comparing categorical distributions across groups.
+
+        Parameters:
+            categorical_columns (list): List of categorical columns to compare.
+            hue_col (str): The column to use for grouping (e.g., 'risk_group').
+        """
+        for col in categorical_columns:
+            if col in self.eda_data_frame.columns:
+                plt.figure(figsize=(8, 5))
+
+                # Define fixed order for grade if it's the column being plotted
+                order = ['A', 'B', 'C', 'D', 'E', 'F', 'G'] if col == 'grade' else None
+
+                sns.countplot(data=self.eda_data_frame, x=col, hue=hue_col, order=order)
+                plt.title(f'{col.capitalize()} Distribution by {hue_col}')
+                plt.xticks(rotation=45)
+                plt.tight_layout()
+                plt.show()
+            else:
+                print(f"Column '{col}' not found in DataFrame.")
+
 
 class DataFrameTransform:
 
